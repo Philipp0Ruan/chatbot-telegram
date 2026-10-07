@@ -1,0 +1,1118 @@
+{
+  "name": "Chatbot Telegram - Temperatura Brasil + Redis + Gemini",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {}
+      },
+      "id": "e52586f0-32e7-50e6-bf2e-2f6457be28a0",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "8b37789d-2b65-49a2-87a3-b5405bb514b6",
+      "notes": "Selecione a credencial Telegram API do seu bot. Mensagens sem texto recebem orientacao.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "e4615450-1462-59d0-a0fc-052ee0c799ac",
+              "name": "queue",
+              "value": "={{ String($json.message?.text ?? '').normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').toLowerCase().trim().replace(/\\s+/g, ' ').replace(/\\s*,\\s*/g, ',') }}",
+              "type": "string"
+            },
+            {
+              "id": "8c411fcd-794e-566a-a2f2-eb4012de4fa0",
+              "name": "chatId",
+              "value": "={{ $json.message?.chat?.id != null ? String($json.message.chat.id) : \"\" }}",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": false,
+        "options": {}
+      },
+      "id": "e2e9274d-2462-5682-9812-ce4c57ed4a73",
+      "name": "Capturar entrada",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        240,
+        0
+      ],
+      "notes": "Normaliza acentos, caixa e espacos extras. Preserva espacos internos de nomes compostos; o HTTP Request faz o URL encoding."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Executado por item. A chave da API nunca entra nos dados deste node.\nconst chatId = String($json.chatId ?? '');\nif (!/^-?\\d+$/.test(chatId)) return null;\nconst originalQueue = String($json.queue ?? '');\nconst NOT_FOUND = '\\u274c Cidade n\\u00e3o encontrada. Use o formato Cidade,UF,BR (ex.: S\\u00e3o Paulo,SP,BR).';\nconst base = { chatId, inputQueue: originalQueue, valid: false, ok: false, message: NOT_FOUND };\n\nif (/^\\/(start|help|ajuda)(@[a-z0-9_]+)?(?:\\s.*)?$/i.test(originalQueue)) {\n  return { json: { ...base, errorType: 'help', message: 'Ol\\u00e1! Envie Cidade,UF,BR para consultar a temperatura. Ex.: S\\u00e3o Paulo,SP,BR. Tamb\\u00e9m aceito Cidade,UF.' } };\n}\n\nconst parts = originalQueue.split(',').map(part => part.trim());\nconst city = (parts[0] ?? '').replace(/[\\u2018\\u2019]/g, \"'\");\nconst uf = (parts[1] ?? '').toUpperCase();\nconst country = (parts[2] ?? 'br').toLowerCase();\nconst states = new Set('AC AL AP AM BA CE DF ES GO MA MT MS MG PA PB PR PE PI RJ RN RS RO RR SC SP SE TO'.split(' '));\nconst validCity = city.length >= 2 && city.length <= 100 && /^[a-z0-9][a-z0-9 .'-]*$/.test(city) && /[a-z]/.test(city);\nif ((parts.length !== 2 && parts.length !== 3) || !validCity || !states.has(uf) || country !== 'br') {\n  return { json: { ...base, errorType: 'invalid_input' } };\n}\n\n// A API so documenta filtro por state code para os EUA. A UF brasileira\n// e validada no resultado do Geocoding, nunca ignorada silenciosamente.\nconst cacheSlug = city.normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').toLowerCase()\n  .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');\nreturn { json: { chatId, inputQueue: originalQueue, city, uf, country: 'BR',\n                 queue: `${city},br`, cacheKey: `weather:br:${uf.toLowerCase()}:${cacheSlug}`, valid: true, ok: false } };"
+      },
+      "id": "107b67e6-de2b-5889-a613-9e598cd069f9",
+      "name": "Preparar consulta",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        0
+      ],
+      "notes": "Valida entrada, normaliza Cidade/UF/BR e cria cacheKey por cidade+UF. Cache nunca e compartilhado entre cidades diferentes.",
+      "notesInFlow": false
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "eded0cf6-0e07-564d-8ee3-140433f863c3",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "81f64fba-ef45-5115-b488-9830870df10b",
+      "name": "Entrada valida?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        720,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "545a5d54-1a20-4e7d-83ca-07e8cc87cce8",
+              "leftValue": "={{ String($env.REDIS_CACHE_ENABLED ?? 'false').toLowerCase() === 'true' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "506aca2b-7405-4415-8d68-553d5b35449e",
+      "name": "Cache Redis habilitado?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        960,
+        -120
+      ],
+      "notes": "Opcional. Se REDIS_CACHE_ENABLED nao for true, o fluxo ignora Redis e continua funcional sem credencial."
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "key": "={{ $('Preparar consulta').item.json.cacheKey }}",
+        "options": {}
+      },
+      "id": "def6f96d-d3c0-4473-b0ad-a564a8966d05",
+      "name": "Redis - Buscar cache",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        1200,
+        -280
+      ],
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput",
+      "notes": "GET da temperatura em cache. Configure a credencial Redis no n8n. Sem segredo embutido no JSON."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const base = $('Preparar consulta').item.json;\nlet raw = $json.value ?? $json.data ?? null;\nlet cached = null;\nif (typeof raw === 'string' && raw.trim()) {\n  try { cached = JSON.parse(raw); } catch {}\n} else if (raw && typeof raw === 'object') cached = raw;\nconst valid = cached && cached.ok === true && Number.isFinite(Number(cached.temperature)) &&\n  typeof cached.cityName === 'string' && cached.cityName && cached.uf === base.uf;\nif (!valid) return { json: { ...base, cacheHit: false } };\nconst temperature = Math.round(Number(cached.temperature));\nconst cityName = cached.cityName.trim();\nconst message = `🌤️ A temperatura em ${cityName} (${base.uf}) é de ${temperature}°C.`;\nconst escapeHtml = v => String(v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');\nreturn { json: { chatId: base.chatId, queue: base.queue, cacheKey: base.cacheKey, cityName, uf: base.uf,\n  statusCode: 200, ok: true, retryCoordinates: false, temperature, cacheHit: true,\n  message, telegramText: escapeHtml(message) } };"
+      },
+      "id": "8c22a138-3cfa-4088-8889-eb6116ce743d",
+      "name": "Interpretar cache",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1440,
+        -280
+      ],
+      "notes": "Valida o JSON do Redis. Cache corrompido/ausente vira miss e nunca gera temperatura falsa."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "e44ca9e4-45d5-4db8-bed2-c9cdf10f32d7",
+              "leftValue": "={{ $json.cacheHit }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b8aff52e-608c-4d0d-a356-30f5008df6a6",
+      "name": "Cache encontrado?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1680,
+        -520
+      ],
+      "notes": "HIT: pula OpenWeather. MISS: segue para geocodificacao + clima."
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.openweathermap.org/geo/1.0/direct",
+        "authentication": "none",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "q",
+              "value": "={{ $json.queue }}"
+            },
+            {
+              "name": "limit",
+              "value": "5"
+            },
+            {
+              "name": "appid",
+              "value": "={{ $env.OPENWEATHER_API_KEY }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 12000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "c9d81f94-99c4-5de8-8e1a-4780b21ae61e",
+      "name": "Localizar cidade",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1680,
+        -120
+      ],
+      "onError": "continueRegularOutput",
+      "notes": "Consulta geocodificacao com a mesma chave OpenWeather. A UF e conferida no campo state do resultado.",
+      "notesInFlow": false
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const input = $('Preparar consulta').item.json;\nconst NOT_FOUND = '\\u274c Cidade n\\u00e3o encontrada. Use o formato Cidade,UF,BR (ex.: S\\u00e3o Paulo,SP,BR).';\nconst UNAVAILABLE = '\\u26a0\\ufe0f N\\u00e3o consegui consultar a temperatura agora. Tente novamente em instantes.';\nconst rawStatus = Number($json.statusCode ?? 0);\nconst statusCode = Number.isInteger(rawStatus) ? rawStatus : 0;\nconst fail = (errorType, message = NOT_FOUND) => ({ json: {\n  ...input, found: false, ok: false, statusCode, errorType, message\n} });\n\n// Nao repassar error/headers/body brutos: podem conter detalhes da requisicao.\nif ($json.error || statusCode === 0 || [401, 403, 429].includes(statusCode) || statusCode >= 500) {\n  return fail('geocoding_unavailable', UNAVAILABLE);\n}\nif (statusCode < 200 || statusCode >= 300) return fail('geocoding_http_error');\nlet body = $json.body;\nif (typeof body === 'string') {\n  try { body = JSON.parse(body); } catch { return fail('invalid_geocoding_json'); }\n}\nif (!Array.isArray(body)) return fail('invalid_geocoding_body');\n\nconst normalize = value => String(value ?? '').normalize('NFD')\n  .replace(/[\\u0300-\\u036f]/g, '').toLowerCase().trim()\n  .replace(/[\\u2018\\u2019]/g, \"'\").replace(/\\s+/g, ' ');\nconst stateNames = {\n  AC: 'acre', AL: 'alagoas', AP: 'amapa', AM: 'amazonas', BA: 'bahia',\n  CE: 'ceara', DF: 'distrito federal', ES: 'espirito santo', GO: 'goias',\n  MA: 'maranhao', MT: 'mato grosso', MS: 'mato grosso do sul', MG: 'minas gerais',\n  PA: 'para', PB: 'paraiba', PR: 'parana', PE: 'pernambuco', PI: 'piaui',\n  RJ: 'rio de janeiro', RN: 'rio grande do norte', RS: 'rio grande do sul',\n  RO: 'rondonia', RR: 'roraima', SC: 'santa catarina', SP: 'sao paulo',\n  SE: 'sergipe', TO: 'tocantins'\n};\nconst stateMatches = value => {\n  const state = normalize(value).replace(/^(state of |estado (?:de|do|da) )/, '').replace(/ state$/, '');\n  return state === input.uf.toLowerCase() || state === `br-${input.uf.toLowerCase()}` ||\n         state === stateNames[input.uf] || (input.uf === 'DF' && state === 'federal district');\n};\nconst validCoord = place => typeof place.lat === 'number' && Number.isFinite(place.lat) &&\n  typeof place.lon === 'number' && Number.isFinite(place.lon) &&\n  Math.abs(place.lat) <= 90 && Math.abs(place.lon) <= 180;\nconst matches = body.filter(place => {\n  if (!place || typeof place !== 'object' || Array.isArray(place)) return false;\n  const names = [place.name, ...Object.values(place.local_names ?? {})];\n  return place.country === 'BR' && stateMatches(place.state) && validCoord(place) &&\n    names.some(name => typeof name === 'string' && normalize(name) === input.city);\n});\nconst unique = matches.filter((place, index) => !matches.slice(0, index).some(previous =>\n  Math.abs(place.lat - previous.lat) < 0.0001 && Math.abs(place.lon - previous.lon) < 0.0001));\nif (unique.length === 0) return fail('city_or_state_not_found');\nif (unique.length > 1) return fail('ambiguous_city');\nconst place = unique[0];\nconst cityName = [place.local_names?.pt_br, place.local_names?.pt, place.name]\n  .find(name => typeof name === 'string' && name.trim().length > 0);\nif (!cityName) return fail('missing_city_name');\nreturn { json: { ...input, found: true, ok: false, cityName: cityName.trim(),\n                 latitude: place.lat, longitude: place.lon } };"
+      },
+      "id": "3a500f87-2823-5818-a135-8f77ae789428",
+      "name": "Selecionar cidade e UF",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1920,
+        -120
+      ],
+      "notes": "Exige pais BR, nome e UF correspondentes e coordenadas validas. Recusa resultado ambiguo.",
+      "notesInFlow": false
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "da50d8b0-261a-50ae-8526-84847894269a",
+              "leftValue": "={{ $json.found }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "5d2989da-512f-58b9-84bc-4a13c47547b3",
+      "name": "Cidade encontrada?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2160,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.openweathermap.org/data/2.5/weather",
+        "authentication": "none",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "q",
+              "value": "={{ $json.queue }}"
+            },
+            {
+              "name": "units",
+              "value": "metric"
+            },
+            {
+              "name": "lang",
+              "value": "pt_br"
+            },
+            {
+              "name": "appid",
+              "value": "={{ $env.OPENWEATHER_API_KEY }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 12000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "bff213c9-cd02-5b4a-b3ec-cdb623347a61",
+      "name": "Consultar temperatura",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2400,
+        -240
+      ],
+      "onError": "continueRegularOutput",
+      "notes": "q recebe a variavel queue. appid e lido exclusivamente de $env.OPENWEATHER_API_KEY. Nunca use um parametro chamado queue na API.",
+      "notesInFlow": false
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const place = $('Selecionar cidade e UF').item.json;\nconst NOT_FOUND = '\\u274c Cidade n\\u00e3o encontrada. Use o formato Cidade,UF,BR (ex.: S\\u00e3o Paulo,SP,BR).';\nconst UNAVAILABLE = '\\u26a0\\ufe0f N\\u00e3o consegui consultar a temperatura agora. Tente novamente em instantes.';\nconst rawStatus = Number($json.statusCode ?? 0);\nconst statusCode = Number.isInteger(rawStatus) ? rawStatus : 0;\nconst fail = (errorType, message = NOT_FOUND, retryCoordinates = false) => ({ json: {\n  ...place, ok: false, retryCoordinates, statusCode, errorType, message\n} });\nif ($json.error || statusCode === 0 || [401, 403, 429].includes(statusCode) || statusCode >= 500) {\n  return fail('weather_unavailable', UNAVAILABLE);\n}\nlet body = $json.body;\nif (typeof body === 'string') {\n  try { body = JSON.parse(body); } catch { return fail('invalid_weather_json'); }\n}\nconst code = Number(body?.cod ?? 0);\nif ([401, 403, 429].includes(code) || code >= 500) return fail('weather_api_unavailable', UNAVAILABLE);\nconst validBody = statusCode >= 200 && statusCode < 300 && code === 200 &&\n  body && typeof body === 'object' && !Array.isArray(body) &&\n  typeof body.main?.temp === 'number' && Number.isFinite(body.main.temp) &&\n  typeof body.name === 'string' && body.name.trim().length > 0;\nconst sameLocation = body?.sys?.country === 'BR' &&\n  typeof body.coord?.lat === 'number' && Number.isFinite(body.coord.lat) &&\n  typeof body.coord?.lon === 'number' && Number.isFinite(body.coord.lon) &&\n  Math.abs(body.coord.lat - place.latitude) <= 0.01 &&\n  Math.abs(body.coord.lon - place.longitude) <= 0.01;\n\n// Preserva a chamada q=queue pedida pelo exercicio, mas nao aceita clima\n// de uma cidade homonima. A alternativa por coordenadas so roda quando precisa.\nif (statusCode === 404 || code === 404) return fail('retry_by_coordinates', NOT_FOUND, true);\nif (!validBody) return fail('invalid_weather_body');\nif (!sameLocation) return fail('retry_by_coordinates', NOT_FOUND, true);\n\n// Math.round nao transforma null, strings ou campos ausentes em temperatura.\nconst temperature = Math.round(body.main.temp);\nconst escapeHtml = value => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst message = `\\ud83c\\udf24\\ufe0f A temperatura em ${place.cityName} (${place.uf}) \\u00e9 de ${temperature}\\u00b0C.`;\nreturn { json: { chatId: place.chatId, queue: place.queue, cacheKey: place.cacheKey, cityName: place.cityName, uf: place.uf,\n  statusCode, ok: true, retryCoordinates: false, temperature,\n  message, telegramText: escapeHtml(message) } };"
+      },
+      "id": "c0ea3848-6f96-5d2d-a052-509437bc6e41",
+      "name": "Avaliar consulta por nome",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2640,
+        -240
+      ],
+      "notes": "Valida HTTP, cod, main.temp, name, BR e coordenadas. Divergencia de local ou HTTP 404 habilita consulta por coordenadas.",
+      "notesInFlow": false
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "5bdc9d38-3d22-5be0-89d7-2b1417967226",
+              "leftValue": "={{ $json.retryCoordinates }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "956085fe-654d-5c0e-b3d8-544897c3b857",
+      "name": "Consultar por coordenadas?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2880,
+        -240
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.openweathermap.org/data/2.5/weather",
+        "authentication": "none",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "lat",
+              "value": "={{ $json.latitude }}"
+            },
+            {
+              "name": "lon",
+              "value": "={{ $json.longitude }}"
+            },
+            {
+              "name": "units",
+              "value": "metric"
+            },
+            {
+              "name": "lang",
+              "value": "pt_br"
+            },
+            {
+              "name": "appid",
+              "value": "={{ $env.OPENWEATHER_API_KEY }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 12000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "e66191ba-3bc9-51c1-aa49-913d4a507b72",
+      "name": "Temperatura por coordenadas",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3120,
+        -400
+      ],
+      "onError": "continueRegularOutput",
+      "notes": "Alternativa para homonimos ou consulta por nome indisponivel. Nao mistura q com lat/lon e nao repete a chamada indefinidamente.",
+      "notesInFlow": false
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const place = $('Selecionar cidade e UF').item.json;\nconst NOT_FOUND = '\\u274c Cidade n\\u00e3o encontrada. Use o formato Cidade,UF,BR (ex.: S\\u00e3o Paulo,SP,BR).';\nconst UNAVAILABLE = '\\u26a0\\ufe0f N\\u00e3o consegui consultar a temperatura agora. Tente novamente em instantes.';\nconst rawStatus = Number($json.statusCode ?? 0);\nconst statusCode = Number.isInteger(rawStatus) ? rawStatus : 0;\nconst fail = (errorType, message = NOT_FOUND, retryCoordinates = false) => ({ json: {\n  ...place, ok: false, retryCoordinates, statusCode, errorType, message\n} });\nif ($json.error || statusCode === 0 || [401, 403, 429].includes(statusCode) || statusCode >= 500) {\n  return fail('weather_unavailable', UNAVAILABLE);\n}\nlet body = $json.body;\nif (typeof body === 'string') {\n  try { body = JSON.parse(body); } catch { return fail('invalid_weather_json'); }\n}\nconst code = Number(body?.cod ?? 0);\nif ([401, 403, 429].includes(code) || code >= 500) return fail('weather_api_unavailable', UNAVAILABLE);\nconst validBody = statusCode >= 200 && statusCode < 300 && code === 200 &&\n  body && typeof body === 'object' && !Array.isArray(body) &&\n  typeof body.main?.temp === 'number' && Number.isFinite(body.main.temp) &&\n  typeof body.name === 'string' && body.name.trim().length > 0;\nconst sameLocation = body?.sys?.country === 'BR' &&\n  typeof body.coord?.lat === 'number' && Number.isFinite(body.coord.lat) &&\n  typeof body.coord?.lon === 'number' && Number.isFinite(body.coord.lon) &&\n  Math.abs(body.coord.lat - place.latitude) <= 0.01 &&\n  Math.abs(body.coord.lon - place.longitude) <= 0.01;\n\nif (!validBody || !sameLocation) return fail('invalid_coordinate_weather');\n\n// Math.round nao transforma null, strings ou campos ausentes em temperatura.\nconst temperature = Math.round(body.main.temp);\nconst escapeHtml = value => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst message = `\\ud83c\\udf24\\ufe0f A temperatura em ${place.cityName} (${place.uf}) \\u00e9 de ${temperature}\\u00b0C.`;\nreturn { json: { chatId: place.chatId, queue: place.queue, cacheKey: place.cacheKey, cityName: place.cityName, uf: place.uf,\n  statusCode, ok: true, retryCoordinates: false, temperature,\n  message, telegramText: escapeHtml(message) } };"
+      },
+      "id": "9099774a-ef6f-5d4d-989d-0db946678afb",
+      "name": "Formatar resposta por coordenadas",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3360,
+        -400
+      ],
+      "notes": "Formatacao deterministica em portugues, sem Gemini, com arredondamento e escape HTML.",
+      "notesInFlow": false
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "5b54ac5f-2020-5f86-8c51-0d0d68811106",
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "4676d3f3-f927-5911-a7c5-4ec15a1b724a",
+      "name": "Resposta valida?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3600,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "52b360e8-6b9f-4cc7-a569-e2e53b3536f7",
+              "leftValue": "={{ String($env.REDIS_CACHE_ENABLED ?? 'false').toLowerCase() === 'true' && $json.ok === true && !!$json.cacheKey }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b652f75a-2e31-44cb-9c0e-d87e243bbd81",
+      "name": "Gravar cache?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3840,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "set",
+        "key": "={{ $json.cacheKey }}",
+        "value": "={{ JSON.stringify({ ok: true, cityName: $json.cityName, uf: $json.uf, temperature: $json.temperature, cachedAt: $now.toISO() }) }}",
+        "expire": true,
+        "ttl": 1800
+      },
+      "id": "516a4357-2d09-4134-b4ec-63addbce8add",
+      "name": "Redis - Salvar 30 min",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        4080,
+        -300
+      ],
+      "onError": "continueRegularOutput",
+      "notes": "SET com TTL de 1800 segundos (30 min). Cache contem apenas dados climaticos necessarios, sem chatId/token."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const data = $('Resposta valida?').item.json;\nreturn { json: { ...data, cacheHit: false, cacheStored: !$json.error } };"
+      },
+      "id": "556e7bb9-1ce2-4a05-b47d-7aff4dee8dbe",
+      "name": "Restaurar resposta apos cache",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4320,
+        -300
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const source = $json;\nif (source.ok !== true || !Number.isFinite(Number(source.temperature))) return { json: source };\nconst deterministicMessage = source.message || `🌤️ A temperatura em ${source.cityName} (${source.uf}) é de ${Math.round(Number(source.temperature))}°C.`;\nreturn { json: { ...source, deterministicMessage,\n  geminiPrompt: `Reescreva de forma curta, clara e amigável a mensagem de temperatura abaixo. Não altere cidade, UF ou temperatura. Não invente previsão, sensação térmica ou qualquer outro dado. Retorne SOMENTE JSON válido no formato {\\\"message\\\":\\\"texto\\\",\\\"ok\\\":true}. Mensagem base: ${deterministicMessage}` } };"
+      },
+      "id": "4ebce034-d0d4-42c5-a5d0-45620ecfc20e",
+      "name": "Preparar mensagem para IA",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4560,
+        -100
+      ],
+      "notes": "Fallback deterministico ja esta pronto antes do Gemini. A IA so pode reescrever a forma, nunca o dado meteorologico."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "33736d77-ffe1-48ca-abdb-96d029000591",
+              "leftValue": "={{ String($env.GEMINI_ENABLED ?? 'false').toLowerCase() === 'true' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "eb73f41e-f3fe-45ea-9d54-9a28f27bcfd6",
+      "name": "Gemini habilitado?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        4800,
+        -100
+      ],
+      "notes": "Deixe GEMINI_ENABLED=false para executar sem credencial Gemini. Ative somente apos configurar Google Gemini(PaLM) API no node."
+    },
+    {
+      "parameters": {
+        "resource": "text",
+        "operation": "message",
+        "modelId": {
+          "__rl": true,
+          "value": "models/gemini-2.5-flash",
+          "mode": "id"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "={{ $json.geminiPrompt }}",
+              "role": "user"
+            }
+          ]
+        },
+        "simplify": true,
+        "jsonOutput": true,
+        "builtInTools": {},
+        "options": {
+          "systemMessage": "Você melhora apenas a redação de respostas meteorológicas. Preserve exatamente cidade, UF e temperatura fornecidas. Responda em português do Brasil e somente em JSON válido.",
+          "temperature": 0.2,
+          "topP": 0.9,
+          "topK": 40,
+          "maxOutputTokens": 120,
+          "thinkingBudget": 0
+        }
+      },
+      "id": "424e303c-17a8-40e2-8411-16a5cf63083e",
+      "name": "Google Gemini - Melhorar resposta",
+      "type": "@n8n/n8n-nodes-langchain.googleGemini",
+      "typeVersion": 1.1,
+      "position": [
+        5040,
+        -340
+      ],
+      "onError": "continueRegularOutput",
+      "notes": "Gemini 2.5 Flash opcional. Configure a credencial Google Gemini(PaLM) API manualmente no n8n. Sem chave no JSON."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const base = $('Preparar mensagem para IA').item.json;\nconst fallback = base.deterministicMessage || base.message;\nconst walk = obj => {\n  if (!obj) return null;\n  if (typeof obj === 'string') return obj;\n  if (Array.isArray(obj)) { for (const v of obj) { const r = walk(v); if (r) return r; } return null; }\n  if (typeof obj === 'object') {\n    if (typeof obj.message === 'string') return JSON.stringify({ message: obj.message, ok: obj.ok ?? true });\n    for (const k of ['text','content','output','response','parts','candidates']) { if (k in obj) { const r=walk(obj[k]); if (r) return r; } }\n  }\n  return null;\n};\nlet candidate = walk($json);\nlet parsed = null;\nif (candidate) {\n  try { parsed = JSON.parse(candidate.replace(/^```json\\s*/i,'').replace(/```$/,'').trim()); } catch {}\n}\nconst sameTemp = parsed?.message && String(parsed.message).includes(`${Math.round(Number(base.temperature))}°C`);\nconst sameUf = parsed?.message && String(parsed.message).toUpperCase().includes(`(${String(base.uf).toUpperCase()})`);\nconst message = parsed?.ok === true && sameTemp && sameUf && String(parsed.message).length <= 240 ? String(parsed.message).trim() : fallback;\nconst escapeHtml = v => String(v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');\nreturn { json: { ...base, geminiUsed: message !== fallback, message, telegramText: escapeHtml(message) } };"
+      },
+      "id": "263f43c5-609c-4e9a-8f03-ab91e68070ed",
+      "name": "Validar resposta Gemini",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5280,
+        -340
+      ],
+      "notes": "Se Gemini falhar, responder fora do JSON, alterar temperatura/UF ou gerar texto longo, usa fallback deterministico automaticamente."
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $json.chatId }}",
+        "text": "={{ $json.telegramText }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "ebe103fe-e219-5179-bae4-1626918c598f",
+      "name": "Telegram - Temperatura",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        5520,
+        -100
+      ],
+      "notes": "Selecione a MESMA credencial Telegram API do Trigger.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $json.chatId }}",
+        "text": "={{ $json.message }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "5befea4c-47f7-5ff2-a6a2-99b9a9958766",
+      "name": "Telegram - Erro ou ajuda",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        4080,
+        420
+      ],
+      "notes": "Selecione a MESMA credencial Telegram API do Trigger. Nunca envia detalhes tecnicos ou chaves para o usuario.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "content": "## Arquitetura com cache + IA\n\n1. Telegram recebe `Cidade,UF,BR`.\n2. Entrada e normalizada e validada.\n3. Se `REDIS_CACHE_ENABLED=true`, tenta cache por **cidade + UF**.\n4. HIT: pula OpenWeather. MISS: consulta geocodificacao + clima e grava por 30 min.\n5. Resposta deterministica e sempre criada.\n6. Se `GEMINI_ENABLED=true`, Gemini 2.5 Flash melhora somente a redacao; qualquer falha usa fallback.",
+        "width": 980,
+        "height": 300,
+        "color": 5
+      },
+      "id": "80c86a43-2dab-4301-8cff-887a0f45b1de",
+      "name": "Arquitetura do projeto",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        900,
+        -850
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Sem segredos no JSON\n\nObrigatorio: `OPENWEATHER_API_KEY` no ambiente do n8n e credencial Telegram selecionada nos nodes Telegram.\n\nOpcionais: credencial Redis + `REDIS_CACHE_ENABLED=true`; credencial Google Gemini(PaLM) API + `GEMINI_ENABLED=true`.\n\nPara avaliacao sem Redis/Gemini, deixe as flags como `false`: o fluxo obrigatorio continua funcionando.",
+        "width": 880,
+        "height": 280,
+        "color": 3
+      },
+      "id": "b6790a43-3a46-4ba0-a92b-6480a710b7d8",
+      "name": "Segredos e avaliacao",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        3600,
+        650
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Cache correto\n\nChave: `weather:br:<uf>:<cidade-normalizada>`\n\nEx.: `weather:br:sc:jaragua-do-sul`\n\nTTL: **1800 s (30 min)**.\n\nNao cacheamos somente por UF porque cidades do mesmo estado podem ter temperaturas diferentes.",
+        "width": 760,
+        "height": 260,
+        "color": 4
+      },
+      "id": "04f46d98-0f22-47b8-b678-192b9a51ff43",
+      "name": "Por que cache por cidade",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1200,
+        -850
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Capturar entrada",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Capturar entrada": {
+      "main": [
+        [
+          {
+            "node": "Preparar consulta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar consulta": {
+      "main": [
+        [
+          {
+            "node": "Entrada valida?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Entrada valida?": {
+      "main": [
+        [
+          {
+            "node": "Cache Redis habilitado?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Telegram - Erro ou ajuda",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cache Redis habilitado?": {
+      "main": [
+        [
+          {
+            "node": "Redis - Buscar cache",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Localizar cidade",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Redis - Buscar cache": {
+      "main": [
+        [
+          {
+            "node": "Interpretar cache",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Interpretar cache": {
+      "main": [
+        [
+          {
+            "node": "Cache encontrado?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cache encontrado?": {
+      "main": [
+        [
+          {
+            "node": "Preparar mensagem para IA",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Localizar cidade",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Localizar cidade": {
+      "main": [
+        [
+          {
+            "node": "Selecionar cidade e UF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Selecionar cidade e UF": {
+      "main": [
+        [
+          {
+            "node": "Cidade encontrada?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cidade encontrada?": {
+      "main": [
+        [
+          {
+            "node": "Consultar temperatura",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Telegram - Erro ou ajuda",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Consultar temperatura": {
+      "main": [
+        [
+          {
+            "node": "Avaliar consulta por nome",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Avaliar consulta por nome": {
+      "main": [
+        [
+          {
+            "node": "Consultar por coordenadas?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Consultar por coordenadas?": {
+      "main": [
+        [
+          {
+            "node": "Temperatura por coordenadas",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Resposta valida?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Temperatura por coordenadas": {
+      "main": [
+        [
+          {
+            "node": "Formatar resposta por coordenadas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Formatar resposta por coordenadas": {
+      "main": [
+        [
+          {
+            "node": "Resposta valida?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resposta valida?": {
+      "main": [
+        [          {
+            "node": "Gravar cache?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Telegram - Erro ou ajuda",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gravar cache?": {
+      "main": [
+        [
+          {
+            "node": "Redis - Salvar 30 min",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Preparar mensagem para IA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Redis - Salvar 30 min": {
+      "main": [
+        [
+          {
+            "node": "Restaurar resposta apos cache",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restaurar resposta apos cache": {
+      "main": [
+        [
+          {
+            "node": "Preparar mensagem para IA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar mensagem para IA": {
+      "main": [
+        [
+          {
+            "node": "Gemini habilitado?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini habilitado?": {
+      "main": [
+        [
+          {
+            "node": "Google Gemini - Melhorar resposta",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Telegram - Temperatura",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Gemini - Melhorar resposta": {
+      "main": [
+        [
+          {
+            "node": "Validar resposta Gemini",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validar resposta Gemini": {
+      "main": [
+        [
+          {
+            "node": "Telegram - Temperatura",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Sao_Paulo",
+    "executionTimeout": 120,
+    "saveDataErrorExecution": "none",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": false,
+    "saveExecutionProgress": false
+  },
+  "tags": []
+}
